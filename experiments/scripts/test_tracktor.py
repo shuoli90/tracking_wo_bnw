@@ -22,6 +22,10 @@ from tracktor.tracker import Tracker
 from tracktor.reid.resnet import resnet50
 from tracktor.utils import interpolate, plot_sequence, get_mot_accum, evaluate_mot_accums
 
+import cv2
+from numpy import genfromtxt
+# from model.config import cfg as frcnn_cfg
+
 ex = Experiment()
 
 ex.add_config('experiments/cfgs/tracktor.yaml')
@@ -61,14 +65,14 @@ def main(tracktor, reid, _config, _log, _run):
                                map_location=lambda storage, loc: storage))
 
     obj_detect.eval()
-    obj_detect.cuda()
+    # obj_detect.cuda()
 
     # reid
     reid_network = resnet50(pretrained=False, **reid['cnn'])
     reid_network.load_state_dict(torch.load(tracktor['reid_weights'],
                                  map_location=lambda storage, loc: storage))
     reid_network.eval()
-    reid_network.cuda()
+    # reid_network.cuda()
 
     # tracktor
     if 'oracle' in tracktor:
@@ -79,9 +83,16 @@ def main(tracktor, reid, _config, _log, _run):
     time_total = 0
     num_frames = 0
     mot_accums = []
+    variances = []
     dataset = Datasets(tracktor['dataset'])
     for seq in dataset:
         tracker.reset()
+
+        folder = f'{seq}'
+        gt_file = osp.join('data', 'MOT17Labels', 'train', folder, 'gt', 'gt.txt')
+        
+        my_data = genfromtxt(gt_file, delimiter=',')
+        my_data = my_data[my_data[:, 7]==1, :]
 
         start = time.time()
 
@@ -89,11 +100,21 @@ def main(tracktor, reid, _config, _log, _run):
 
         data_loader = DataLoader(seq, batch_size=1, shuffle=False)
         for i, frame in enumerate(tqdm(data_loader)):
+            if i > 100:
+                break
             if len(seq) * tracktor['frame_split'][0] <= i <= len(seq) * tracktor['frame_split'][1]:
                 with torch.no_grad():
-                    tracker.step(frame)
+                    frame_detection = my_data[my_data[:,0]==i+1, :]
+                    # breakpoint()
+                    tracker.step(frame, frame_detection)
                 num_frames += 1
+            # breakpoint()
+        residuals = np.stack(tracker.residuals, axis=0)
+        variance = np.std(residuals, axis=0)
+        print(variance)
+        variances.append(variance)
         results = tracker.get_results()
+        # breakpoint()
 
         time_total += time.time() - start
 
