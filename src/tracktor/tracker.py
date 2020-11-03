@@ -11,6 +11,10 @@ from .utils import bbox_overlaps, warp_pos, get_center, get_height, get_width, m
 
 from torchvision.ops.boxes import clip_boxes_to_image, nms
 
+from .kalmanFilter import KalmanFilter
+
+import time
+from scipy import spatial
 
 class Tracker:
 	"""The main tracking file, here is where magic happens."""
@@ -42,6 +46,8 @@ class Tracker:
 		self.track_num = 0
 		self.im_index = 0
 		self.results = {}
+
+		self.residuals = []
 
 	def reset(self, hard=True):
 		self.tracks = []
@@ -89,10 +95,17 @@ class Tracker:
 				self.tracks_to_inactive([t])
 			else:
 				s.append(scores[i])
-				# t.prev_pos = t.pos
-				t.pos = pos[i].view(1, -1)
+				"""
+				Add kalman filter here!
+				"""
+				## t.prev_pos = t.pos
+				# t.pos = pos[i].view(1, -1)
+				
+				t.kf.correct(pos[i].view(1, -1))
+				t.pos = t.kf.predictedState.T
 
-		return torch.Tensor(s[::-1]).cuda()
+		# return torch.Tensor(s[::-1]).cuda()
+		return torch.Tensor(s[::-1])
 
 	def get_pos(self):
 		"""Get the positions of all active tracks."""
@@ -101,7 +114,8 @@ class Tracker:
 		elif len(self.tracks) > 1:
 			pos = torch.cat([t.pos for t in self.tracks], 0)
 		else:
-			pos = torch.zeros(0).cuda()
+			# pos = torch.zeros(0).cuda()
+			pos = torch.zeros(0)
 		return pos
 
 	def get_features(self):
@@ -111,7 +125,8 @@ class Tracker:
 		elif len(self.tracks) > 1:
 			features = torch.cat([t.features for t in self.tracks], 0)
 		else:
-			features = torch.zeros(0).cuda()
+			# features = torch.zeros(0).cuda()
+			features = torch.zeros(0)
 		return features
 
 	def get_inactive_features(self):
@@ -121,12 +136,14 @@ class Tracker:
 		elif len(self.inactive_tracks) > 1:
 			features = torch.cat([t.features for t in self.inactive_tracks], 0)
 		else:
-			features = torch.zeros(0).cuda()
+			# features = torch.zeros(0).cuda()
+			features = torch.zeros(0)
 		return features
 
 	def reid(self, blob, new_det_pos, new_det_scores):
 		"""Tries to ReID inactive tracks with provided detections."""
-		new_det_features = [torch.zeros(0).cuda() for _ in range(len(new_det_pos))]
+		# new_det_features = [torch.zeros(0).cuda() for _ in range(len(new_det_pos))]
+		new_det_features = [torch.zeros(0) for _ in range(len(new_det_pos))]
 
 		if self.do_reid:
 			new_det_features = self.reid_network.test_rois(
@@ -172,15 +189,19 @@ class Tracker:
 				for t in remove_inactive:
 					self.inactive_tracks.remove(t)
 
-				keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long().cuda()
+				# keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long().cuda()
+				keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long()
 				if keep.nelement() > 0:
 					new_det_pos = new_det_pos[keep]
 					new_det_scores = new_det_scores[keep]
 					new_det_features = new_det_features[keep]
 				else:
-					new_det_pos = torch.zeros(0).cuda()
-					new_det_scores = torch.zeros(0).cuda()
-					new_det_features = torch.zeros(0).cuda()
+					# new_det_pos = torch.zeros(0).cuda()
+					# new_det_scores = torch.zeros(0).cuda()
+					# new_det_features = torch.zeros(0).cuda()
+					new_det_pos = torch.zeros(0)
+					new_det_scores = torch.zeros(0)
+					new_det_features = torch.zeros(0)
 
 		return new_det_pos, new_det_scores, new_det_features
 
@@ -220,15 +241,24 @@ class Tracker:
 						t.last_pos[i] = warp_pos(t.last_pos[i], warp_matrix)
 
 	def motion_step(self, track):
+		# breakpoint()
 		"""Updates the given track's position by one step based on track.last_v"""
 		if self.motion_model_cfg['center_only']:
 			center_new = get_center(track.pos) + track.last_v
 			track.pos = make_pos(*center_new, get_width(track.pos), get_height(track.pos))
 		else:
-			track.pos = track.pos + track.last_v
+			# track.pos = track.pos + track.last_v
+
+			"""
+			Update kalman filter state
+			"""
+			track.kf.predict(track.last_v)
+			track.pos = track.kf.predictedState.T
+			# breakpoint()
 
 	def motion(self):
 		"""Applies a simple linear motion model that considers the last n_steps steps."""
+		# breakpoint()
 		for t in self.tracks:
 			last_pos = list(t.last_pos)
 
@@ -239,6 +269,10 @@ class Tracker:
 				vs = [p2 - p1 for p1, p2 in zip(last_pos, last_pos[1:])]
 
 			t.last_v = torch.stack(vs).mean(dim=0)
+
+			# gamma = 0.5
+			# t.last_v = gamma * vs[-1] + (1 - gamma) * t.last_v
+
 			self.motion_step(t)
 
 		if self.do_reid:
@@ -246,7 +280,7 @@ class Tracker:
 				if t.last_v.nelement() > 0:
 					self.motion_step(t)
 
-	def step(self, blob):
+	def step(self, blob, frame_detection):
 		"""This function should be called every timestep to perform tracking with a blob
 		containing the image information.
 		"""
@@ -265,7 +299,8 @@ class Tracker:
 			if dets.nelement() > 0:
 				boxes, scores = self.obj_detect.predict_boxes(dets)
 			else:
-				boxes = scores = torch.zeros(0).cuda()
+				# boxes = scores = torch.zeros(0).cuda()
+				boxes = scores = torch.zeros(0)
 		else:
 			boxes, scores = self.obj_detect.detect(blob['img'])
 
@@ -275,26 +310,32 @@ class Tracker:
 			# Filter out tracks that have too low person score
 			inds = torch.gt(scores, self.detection_person_thresh).nonzero().view(-1)
 		else:
-			inds = torch.zeros(0).cuda()
+			# inds = torch.zeros(0).cuda()
+			inds = torch.zeros(0)
 
 		if inds.nelement() > 0:
 			det_pos = boxes[inds]
 
 			det_scores = scores[inds]
 		else:
-			det_pos = torch.zeros(0).cuda()
-			det_scores = torch.zeros(0).cuda()
+			# det_pos = torch.zeros(0).cuda()
+			# det_scores = torch.zeros(0).cuda()
+			det_pos = torch.zeros(0)
+			det_scores = torch.zeros(0)
 
 		##################
 		# Predict tracks #
 		##################
 
 		num_tracks = 0
-		nms_inp_reg = torch.zeros(0).cuda()
+		# nms_inp_reg = torch.zeros(0).cuda()
+		nms_inp_reg = torch.zeros(0)
 		if len(self.tracks):
 			# align
 			if self.do_align:
 				self.align(blob)
+
+			# breakpoint()
 
 			# apply motion model
 			if self.motion_model_cfg['enabled']:
@@ -374,8 +415,90 @@ class Tracker:
 		self.im_index += 1
 		self.last_image = blob['img'][0]
 
+		self.visualize(blob, self.tracks, frame_detection)
+
 	def get_results(self):
 		return self.results
+
+	def visualize(self, blob, tracks, frame_detection):
+		frame = blob['img'][0].data.numpy() * 255
+		frame = frame.astype(np.uint8).transpose(1,2,0)
+
+		def createimage(w,h, frame):
+			size = (w, h, 3)	
+			img = frame.transpose(1,2,0)
+			# breakpoint()
+			img = np.ones((w,h,3),np.uint8)*255
+			# breakpoint()
+			return img
+		
+		img = frame.copy()
+		# frame = createimage(1080, 1920, frame)
+
+		# frame = (frame.permute(1,2,0)*255).data.numpy().astype(np.uint8)
+
+		for t in tracks:
+			pos = t.pos
+			erroCov = torch.diagonal(t.kf.erroCov)
+			# breakpoint()
+			tl = (pos[0, :2]).data.numpy()
+			br = pos[0, 2:].data.numpy()
+			x = int((tl[0]+br[0]) / 2)
+			y = int((tl[1]+br[1]) / 2)
+			# breakpoint()
+			track_id = t.id
+			cv2.rectangle(img, (tl[0], tl[1]), (br[0], br[1]), color=(255,0,0), thickness=2)
+			cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(255,0,0), thickness=2)
+
+			# upper bound
+			cv2.rectangle(img, (tl[0]-erroCov[0], tl[1]-erroCov[1]), (br[0]+erroCov[2], br[1]+erroCov[3]), color=(0,0,255), thickness=2)
+			cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(0,0,255), thickness=4)
+
+			# # lower bound
+			# cv2.rectangle(img, (tl[0]+erroCov[0], tl[1]+erroCov[1]), (br[0]-erroCov[2], br[1]-erroCov[3]), color=(0,255,0), thickness=2)
+			# cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(0,255,0), thickness=3)
+		
+		for gt in frame_detection:
+			cv2.rectangle(img, (int(gt[2]), int(gt[3]+gt[5])), (int(gt[2]+gt[4]), int(gt[3])), color=(255,255,255), thickness=1)
+
+		gt_pos = []
+		for gt in frame_detection:
+			gt_pos.append([int(gt[2]+gt[4]/2), int(gt[3]+gt[5]/2)])
+		gt_pos = np.array(gt_pos)
+		
+		positions = []
+		for t in tracks:
+		    positions.append([int((t.pos[0][0]+t.pos[0][2])/2), int((t.pos[0][1]+t.pos[0][3])/2)])
+		    # breakpoint()
+		positions = np.array(positions)
+
+		indices = []
+		for idx in range(positions.shape[0]):
+			pos = positions[idx]
+			distance, index = spatial.KDTree(gt_pos).query(pos)
+			indices.append(index)
+		
+		# residuals = []
+		for index, t in zip(indices, tracks):
+			tl = (t.pos[0, :2]).data.numpy()
+			br = t.pos[0, 2:].data.numpy()
+			prediction = np.hstack([tl, br])
+
+			gt= frame_detection[index]
+			gt_tl = np.array([gt[2], gt[3]])
+			gt_br = np.array([gt[2]+gt[4], gt[3]+gt[5]])
+			gt = np.hstack([gt_tl, gt_br])
+
+			self.residuals.append(prediction - gt)
+		
+		# breakpoint()
+
+		cv2.imshow('image', img)
+		cv2.imwrite(f'images_uncertain_1std/seq{self.im_index}.png', img)
+		time.sleep(0.1)
+		if cv2.waitKey(1) & 0xFF == ord('q'):
+			cv2.destroyAllWindows()
+		# breakpoint()
 
 
 class Track(object):
@@ -391,8 +514,15 @@ class Track(object):
 		self.inactive_patience = inactive_patience
 		self.max_features_num = max_features_num
 		self.last_pos = deque([pos.clone()], maxlen=mm_steps + 1)
-		self.last_v = torch.Tensor([])
+		self.last_v = torch.Tensor([0])
 		self.gt_id = None
+
+		# init a kalman filter
+		# def __init__(self, dt=1,stateVariance=1,measurementVariance=1, 
+		# 		method="Velocity", state):
+		self.kf = KalmanFilter(state = pos)
+
+		# breakpoint()
 
 	def has_positive_area(self):
 		return self.pos[0, 2] > self.pos[0, 0] and self.pos[0, 3] > self.pos[0, 1]

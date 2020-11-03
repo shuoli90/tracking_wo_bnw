@@ -296,7 +296,8 @@ def get_center(pos):
     y1 = pos[0, 1]
     x2 = pos[0, 2]
     y2 = pos[0, 3]
-    return torch.Tensor([(x2 + x1) / 2, (y2 + y1) / 2]).cuda()
+    # return torch.Tensor([(x2 + x1) / 2, (y2 + y1) / 2]).cuda()
+    return torch.Tensor([(x2 + x1) / 2, (y2 + y1) / 2])
 
 
 def get_width(pos):
@@ -308,12 +309,18 @@ def get_height(pos):
 
 
 def make_pos(cx, cy, width, height):
+    # return torch.Tensor([[
+    #     cx - width / 2,
+    #     cy - height / 2,
+    #     cx + width / 2,
+    #     cy + height / 2
+    # ]]).cuda()
     return torch.Tensor([[
         cx - width / 2,
         cy - height / 2,
         cx + width / 2,
         cy + height / 2
-    ]]).cuda()
+    ]])
 
 
 def warp_pos(pos, warp_matrix):
@@ -321,7 +328,8 @@ def warp_pos(pos, warp_matrix):
     p2 = torch.Tensor([pos[0, 2], pos[0, 3], 1]).view(3, 1)
     p1_n = torch.mm(warp_matrix, p1).view(1, 2)
     p2_n = torch.mm(warp_matrix, p2).view(1, 2)
-    return torch.cat((p1_n, p2_n), 1).view(1, -1).cuda()
+    # return torch.cat((p1_n, p2_n), 1).view(1, -1).cuda()
+    return torch.cat((p1_n, p2_n), 1).view(1, -1)
 
 
 def get_mot_accum(results, seq):
@@ -388,3 +396,4 @@ def evaluate_mot_accums(accums, names, generate_overall=False):
         formatters=mh.formatters, 
         namemap=mm.io.motchallenge_metric_names,)
     print(str_summary)
+
