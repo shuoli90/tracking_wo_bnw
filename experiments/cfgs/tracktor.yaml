@@ -30,20 +30,20 @@ tracktor:
 
   tracker:
     # FRCNN score threshold for detections
-    detection_person_thresh: 0.5
+    detection_person_thresh: 0.9
     # FRCNN score threshold for keeping the track alive
-    regression_person_thresh: 0.5
+    regression_person_thresh: 0.3
     # NMS threshold for detection
-    detection_nms_thresh: 0.3
+    detection_nms_thresh: 0.9
     # NMS theshold while tracking
     regression_nms_thresh: 0.6
     # motion model settings
     motion_model:
-      enabled: False
+      enabled: True
       # average velocity over last n_steps steps
       n_steps: 1
       # if true, only model the movement of the bounding box center. If false, width and height are also modeled.
-      center_only: True
+      center_only: False
     # DPM or DPM_RAW or 0, raw includes the unfiltered (no nms) versions of the provided detections,
     # 0 tells the tracker to use private detections (Faster R-CNN)
     public_detections: True
