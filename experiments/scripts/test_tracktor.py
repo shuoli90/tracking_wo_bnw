@@ -65,14 +65,14 @@ def main(tracktor, reid, _config, _log, _run):
                                map_location=lambda storage, loc: storage))
 
     obj_detect.eval()
-    # obj_detect.cuda()
+    obj_detect.cuda()
 
     # reid
     reid_network = resnet50(pretrained=False, **reid['cnn'])
     reid_network.load_state_dict(torch.load(tracktor['reid_weights'],
                                  map_location=lambda storage, loc: storage))
     reid_network.eval()
-    # reid_network.cuda()
+    reid_network.cuda()
 
     # tracktor
     if 'oracle' in tracktor:
@@ -100,21 +100,27 @@ def main(tracktor, reid, _config, _log, _run):
 
         data_loader = DataLoader(seq, batch_size=1, shuffle=False)
         for i, frame in enumerate(tqdm(data_loader)):
-            if i > 100:
-                break
+            # if i > 100:
+            #     break
             if len(seq) * tracktor['frame_split'][0] <= i <= len(seq) * tracktor['frame_split'][1]:
                 with torch.no_grad():
                     frame_detection = my_data[my_data[:,0]==i+1, :]
                     # breakpoint()
                     tracker.step(frame, frame_detection)
                 num_frames += 1
-            # breakpoint()
         residuals = np.stack(tracker.residuals, axis=0)
+        mean = np.mean(residuals, axis=0)
         variance = np.std(residuals, axis=0)
-        print(variance)
+        print('residual means', mean)
+        print('residual variance', variance)
+        ious = np.stack(tracker.ious)
+        ious_mean = np.mean(ious)
+        ious_variance = np.std(ious)
+        print('iou mean', ious_mean)
+        print('iou variance', ious_variance)
         variances.append(variance)
         results = tracker.get_results()
-        # breakpoint()
+        breakpoint()
 
         time_total += time.time() - start
 
