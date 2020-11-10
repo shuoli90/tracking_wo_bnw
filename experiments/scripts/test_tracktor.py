@@ -14,7 +14,7 @@ import yaml
 from tqdm import tqdm
 import sacred
 from sacred import Experiment
-from tracktor.frcnn_fpn import FRCNN_FPN
+from tracktor.frcnn_fpn import FRCNN_FPN, ProbFRCNN_FPN
 from tracktor.config import get_output_dir
 from tracktor.datasets.factory import Datasets
 from tracktor.oracle_tracker import OracleTracker
@@ -60,19 +60,23 @@ def main(tracktor, reid, _config, _log, _run):
     # object detection
     _log.info("Initializing object detector.")
 
-    obj_detect = FRCNN_FPN(num_classes=2)
-    obj_detect.load_state_dict(torch.load(_config['tracktor']['obj_detect_model'],
-                               map_location=lambda storage, loc: storage))
+    # obj_detect = FRCNN_FPN(num_classes=2)
+    # obj_detect.load_state_dict(torch.load(_config['tracktor']['obj_detect_model'],
+    #                            map_location=lambda storage, loc: storage))
 
+    ##NEW: fasterrcnn with regression variance
+    obj_detect = ProbFRCNN_FPN(num_classes=2)
+    obj_detect.load_state_dict(torch.load('output/faster_rcnn_fpn_training_mot_17/model_params_best_coco'))
+    
     obj_detect.eval()
-    # obj_detect.cuda()
+    obj_detect.cuda()
 
     # reid
     reid_network = resnet50(pretrained=False, **reid['cnn'])
     reid_network.load_state_dict(torch.load(tracktor['reid_weights'],
                                  map_location=lambda storage, loc: storage))
     reid_network.eval()
-    # reid_network.cuda()
+    reid_network.cuda()
 
     # tracktor
     if 'oracle' in tracktor:

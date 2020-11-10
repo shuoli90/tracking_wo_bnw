@@ -84,7 +84,7 @@ class Tracker:
 		pos = self.get_pos()
 
 		# regress
-		boxes, scores = self.obj_detect.predict_boxes(pos)
+		boxes, scores, boxes_logvar = self.obj_detect.predict_boxes(pos)
 		pos = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
 
 		s = []
@@ -98,14 +98,14 @@ class Tracker:
 				"""
 				Add kalman filter here!
 				"""
-				## t.prev_pos = t.pos
-				# t.pos = pos[i].view(1, -1)
+				t.prev_pos = t.pos
+				t.pos = pos[i].view(1, -1)
 				
-				t.kf.correct(pos[i].view(1, -1))
-				t.pos = t.kf.predictedState.T
+				#t.kf.correct(pos[i].view(1, -1))
+				#t.pos = t.kf.predictedState.T
 
-		# return torch.Tensor(s[::-1]).cuda()
-		return torch.Tensor(s[::-1])
+		return torch.Tensor(s[::-1]).cuda()
+		#return torch.Tensor(s[::-1])
 
 	def get_pos(self):
 		"""Get the positions of all active tracks."""
@@ -297,12 +297,12 @@ class Tracker:
 		if self.public_detections:
 			dets = blob['dets'].squeeze(dim=0)
 			if dets.nelement() > 0:
-				boxes, scores = self.obj_detect.predict_boxes(dets)
+				boxes, scores, boxes_logvar = self.obj_detect.predict_boxes(dets)
 			else:
 				# boxes = scores = torch.zeros(0).cuda()
-				boxes = scores = torch.zeros(0)
+				boxes = scores = boxes_logvar = torch.zeros(0)
 		else:
-			boxes, scores = self.obj_detect.detect(blob['img'])
+			boxes, scores, boxes_logvar = self.obj_detect.detect(blob['img'])
 
 		if boxes.nelement() > 0:
 			boxes = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
@@ -441,8 +441,8 @@ class Tracker:
 			pos = t.pos
 			erroCov = torch.diagonal(t.kf.erroCov)
 			# breakpoint()
-			tl = (pos[0, :2]).data.numpy()
-			br = pos[0, 2:].data.numpy()
+			tl = (pos[0, :2]).data.cpu().numpy()
+			br = pos[0, 2:].data.cpu().numpy()
 			x = int((tl[0]+br[0]) / 2)
 			y = int((tl[1]+br[1]) / 2)
 			# breakpoint()
@@ -480,8 +480,8 @@ class Tracker:
 		
 		# residuals = []
 		for index, t in zip(indices, tracks):
-			tl = (t.pos[0, :2]).data.numpy()
-			br = t.pos[0, 2:].data.numpy()
+			tl = (t.pos[0, :2]).data.cpu().numpy()
+			br = t.pos[0, 2:].data.cpu().numpy()
 			prediction = np.hstack([tl, br])
 
 			gt= frame_detection[index]
