@@ -86,6 +86,7 @@ class ProbFRCNN_FPN(ProbFasterRCNN):
 
     def __init__(self, num_classes):
         assert(num_classes == 2)
+        print('[ProbFRCNN_FPN] initialized')
         
         backbone = resnet_fpn_backbone('resnet50', False)
         super(ProbFRCNN_FPN, self).__init__(backbone, 91)
