@@ -12,7 +12,7 @@ except Exception as e:
 class KalmanFilter(object): 
     """docstring for KalmanFilter"""
     
-    def __init__(self, state, dt=1, stateVariance=5, measurementVariance=1,  method="Velocity"):
+    def __init__(self, state, dt=1, stateVariance=100, measurementVariance=1,  method="Velocity"):
         super(KalmanFilter, self).__init__()
         self.method = method
         self.stateVariance = stateVariance
@@ -25,43 +25,27 @@ class KalmanFilter(object):
     """init function to initialise the model"""
     def initModel(self): 
 
-        # self.A = np.matrix(np.identity(self.init_state.shape[0]))
         self.A = torch.eye(self.predictedState.shape[0]).cuda()
-        # self.B = np.matrix(np.identity(self.init_state.shape[0]))
         self.B = torch.eye(self.predictedState.shape[0]).cuda()
-        # self.H = np.matrix(np.identity(self.init_state.shape[0]))
         self.H = torch.eye(self.predictedState.shape[0]).cuda()
-        # self.P = np.matrix(self.stateVariance*np.identity(self.A.shape[0]))
-        # self.R = np.matrix(self.measurementVariance*np.identity(self.H.shape[0]))
-        # self.R = self.measurementVariance * torch.eye(self.predictedState.shape[0])
         self.R = torch.diag(torch.tensor([2.27, 2.21, 5.47, 2.86])).cuda()
-        # self.R = torch.diag(torch.tensor([11.25, 5.25, 13.70, 11.01])).cuda()
-        # self.Q = np.matrix(self.stateVariance*np.identity(self.A.shape[0]))
         self.Q = self.stateVariance * torch.eye(self.A.shape[0]).cuda()
         
-        # self.erroCov = np.matrix(self.stateVariance*np.identity(self.A.shape[0]))
-        self.erroCov = self.stateVariance * torch.eye(self.A.shape[0]).cuda()
-        # self.predictedState = self.init_state
-        self.predictedErrorCov = self.erroCov
+        # self.erroCov = self.stateVariance * torch.eye(self.A.shape[0]).cuda()
+        self.erroCov = 0.0 * torch.eye(self.A.shape[0]).cuda()
+        self.predictedErrorCov = 0.0 * torch.eye(self.A.shape[0]).cuda()
 
 
     """Predict function which predicst next state based on previous state"""
     def predict(self, vel):
         self.predictedState = torch.matmul(self.A, self.state) + torch.matmul(self.B, vel.T)
-        # self.predictedState = self.state + vel.T
-        # breakpoint()
         self.predictedErrorCov = torch.matmul(torch.matmul(self.A, self.erroCov), self.A.T) + self.Q
-        # temp = np.asarray(self.predictedState)
-        # return temp[0], temp[2]
+        # breakpoint()
 
     """Correct function which correct the states based on measurements"""
     def correct(self, currentMeasurement):
-        # breakpoint()
-        # self.kalmanGain = self.predictedErrorCov@self.H.T@np.linalg.pinv(self.H@self.predictedErrorCov@self.H.T+self.R)
         self.kalmanGain = self.predictedErrorCov@self.H.T@torch.pinverse(self.H@self.predictedErrorCov@self.H.T+self.R)
-        # breakpoint()
         self.state = self.predictedState + self.kalmanGain@(currentMeasurement.T - (self.H@self.predictedState))
-        # breakpoint()
         self.erroCov = (torch.eye(self.erroCov.shape[0]).cuda() - self.kalmanGain @ self.H) @ self.predictedErrorCov
         # breakpoint()
 

@@ -50,6 +50,10 @@ class Tracker:
 		self.residuals = []
 		self.ious = []
 
+		self.boxes = []
+		self.scores = []
+		self.logvars = []
+
 		# self.use_kf = True
 
 	def reset(self, hard=True):
@@ -88,6 +92,14 @@ class Tracker:
 
 		# regress
 		boxes, scores, boxes_logvar = self.obj_detect.predict_boxes(pos)
+		breakpoint()
+		# self.boxes.append(boxes.cpu().numpy())
+		# self.scores.append(scores.cpu().numpy())
+		# self.logvars.append(boxes_logvar.cpu().numpy())
+		# boxes: means bounding boxes
+		# scores: predicted probability of objects in bbs
+		# boxes_logvar: log of variance of bbs
+
 		pos = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
 
 		s = []
@@ -101,14 +113,14 @@ class Tracker:
 				"""
 				Add kalman filter here!
 				"""
-				# t.prev_pos = t.pos
-				# t.pos = pos[i].view(1, -1)
-                                
+				var = torch.exp(boxes_logvar[i, :])
+				t.kf.R = torch.diag(var)         
 				t.kf.correct(pos[i].view(1, -1))
 				t.pos = t.kf.predictedState.T
 
+				breakpoint()
+
 		return torch.Tensor(s[::-1]).cuda()
-		#return torch.Tensor(s[::-1])
 
 	def get_pos(self):
 		"""Get the positions of all active tracks."""
@@ -118,8 +130,7 @@ class Tracker:
 			pos = torch.cat([t.pos for t in self.tracks], 0)
 		else:
 			pos = torch.zeros(0).cuda()
-			# pos = torch.zeros(0)
-		return pos
+		return torch.clip(pos, min=0.0)
 
 	def get_features(self):
 		"""Get the features of all active tracks."""
@@ -129,7 +140,6 @@ class Tracker:
 			features = torch.cat([t.features for t in self.tracks], 0)
 		else:
 			features = torch.zeros(0).cuda()
-			# features = torch.zeros(0)
 		return features
 
 	def get_inactive_features(self):
@@ -140,13 +150,11 @@ class Tracker:
 			features = torch.cat([t.features for t in self.inactive_tracks], 0)
 		else:
 			features = torch.zeros(0).cuda()
-			# features = torch.zeros(0)
 		return features
 
 	def reid(self, blob, new_det_pos, new_det_scores):
 		"""Tries to ReID inactive tracks with provided detections."""
 		new_det_features = [torch.zeros(0).cuda() for _ in range(len(new_det_pos))]
-		# new_det_features = [torch.zeros(0) for _ in range(len(new_det_pos))]
 
 		if self.do_reid:
 			new_det_features = self.reid_network.test_rois(
@@ -158,16 +166,16 @@ class Tracker:
 				for t in self.inactive_tracks:
 					dist_mat.append(torch.cat([t.test_features(feat.view(1, -1))
 					                           for feat in new_det_features], dim=1))
-					pos.append(t.pos)
+					pos.append(t.pos.cuda())
 				if len(dist_mat) > 1:
 					dist_mat = torch.cat(dist_mat, 0)
 					pos = torch.cat(pos, 0)
 				else:
 					dist_mat = dist_mat[0]
-					pos = pos[0]
+					pos = pos[0].cuda()
 
 				# calculate IoU distances
-				iou = bbox_overlaps(pos, new_det_pos)
+				iou = bbox_overlaps(pos.cuda(), new_det_pos)
 				iou_mask = torch.ge(iou, self.reid_iou_threshold)
 				iou_neg_mask = ~iou_mask
 				# make all impossible assignments to the same add big value
@@ -192,8 +200,7 @@ class Tracker:
 				for t in remove_inactive:
 					self.inactive_tracks.remove(t)
 
-				# keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long().cuda()
-				keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long()
+				keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long().cuda()
 				if keep.nelement() > 0:
 					new_det_pos = new_det_pos[keep]
 					new_det_scores = new_det_scores[keep]
@@ -202,9 +209,6 @@ class Tracker:
 					new_det_pos = torch.zeros(0).cuda()
 					new_det_scores = torch.zeros(0).cuda()
 					new_det_features = torch.zeros(0).cuda()
-					# new_det_pos = torch.zeros(0)
-					# new_det_scores = torch.zeros(0)
-					# new_det_features = torch.zeros(0)
 
 		return new_det_pos, new_det_scores, new_det_features
 
@@ -282,7 +286,7 @@ class Tracker:
 				if t.last_v.nelement() > 0:
 					self.motion_step(t)
 
-	def step(self, blob, frame_detection):
+	def step(self, blob, frame_detection, num_frames):
 		"""This function should be called every timestep to perform tracking with a blob
 		containing the image information.
 		"""
@@ -330,6 +334,7 @@ class Tracker:
 
 		num_tracks = 0
 		nms_inp_reg = torch.zeros(0).cuda()
+		# breakpoint()
 		# nms_inp_reg = torch.zeros(0)
 		if len(self.tracks):
 			# align
@@ -416,12 +421,12 @@ class Tracker:
 		self.im_index += 1
 		self.last_image = blob['img'][0]
 
-		self.visualize(blob, self.tracks, frame_detection)
+		self.visualize(blob, self.tracks, frame_detection, num_frames)
 
 	def get_results(self):
 		return self.results
 
-	def visualize(self, blob, tracks, frame_detection):
+	def visualize(self, blob, tracks, frame_detection, num_frames):
 		frame = blob['img'][0].data.numpy() * 255
 		frame = frame.astype(np.uint8).transpose(1,2,0)
 
@@ -453,7 +458,7 @@ class Tracker:
 
 			# upper bound
 			# if self.use_kf:
-			# erroCov = torch.diagonal(t.kf.erroCov)
+			# erroCov = torch.sqrt(torch.diagonal(t.kf.erroCov))
 			# cv2.rectangle(img, (tl[0]-erroCov[0], tl[1]-erroCov[1]), (br[0]+erroCov[2], br[1]+erroCov[3]), color=(0,0,255), thickness=2)
 			# cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(0,0,255), thickness=4)
 
@@ -483,13 +488,13 @@ class Tracker:
 		indices = np.argmax(iou, axis=0).tolist()
 		# breakpoint()
 
-		# indices = []
-		# for idx in range(positions.shape[0]):
-		# 	pos = positions[idx]
-		# 	distance, index = spatial.KDTree(gt_pos).query(pos)
-		# 	indices.append(index)
+		indices = []
+		for idx in range(positions.shape[0]):
+			pos = positions[idx]
+			distance, index = spatial.KDTree(gt_pos).query(pos)
+			indices.append(index)
 		
-		# residuals = []
+		residuals = []
 		for index, t in zip(indices, tracks):
 			tl = (t.pos[0, :2]).data.cpu().numpy()
 			br = t.pos[0, 2:].data.cpu().numpy()
@@ -504,8 +509,9 @@ class Tracker:
 		
 		# breakpoint()
 
-		cv2.imshow('image', img)
-		cv2.imwrite(f'images_05/seq{self.im_index}.png', img)
+		# cv2.imshow('image', img)
+		# cv2.imwrite(f'images_kf/seq{self.im_index}.png', img)
+		cv2.imwrite(f'images/seq{num_frames}.png', img)
 		time.sleep(0.1)
 		if cv2.waitKey(1) & 0xFF == ord('q'):
 			cv2.destroyAllWindows()
