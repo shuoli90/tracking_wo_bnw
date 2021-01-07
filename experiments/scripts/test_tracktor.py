@@ -24,6 +24,8 @@ from tracktor.utils import interpolate, plot_sequence, get_mot_accum, evaluate_m
 
 import cv2
 from numpy import genfromtxt
+import pickle
+
 # from model.config import cfg as frcnn_cfg
 
 ex = Experiment()
@@ -67,7 +69,9 @@ def main(tracktor, reid, _config, _log, _run):
     ##NEW: fasterrcnn with regression variance
     obj_detect = ProbFRCNN_FPN(num_classes=2)
     obj_detect.load_state_dict(torch.load('output/faster_rcnn_fpn_training_mot_17/model_params_best_coco'))
-    
+    # obj_detect.load_state_dict(torch.load('output/faster_rcnn_fpn_training_mot_17/model_params_best_mot'))
+    # obj_detect.load_state_dict(torch.load('model_params_best_mot'))
+
     obj_detect.eval()
     obj_detect.cuda()
 
@@ -104,14 +108,20 @@ def main(tracktor, reid, _config, _log, _run):
 
         data_loader = DataLoader(seq, batch_size=1, shuffle=False)
         for i, frame in enumerate(tqdm(data_loader)):
-            # if i > 100:
-            #     break
+            if i > 200:
+                break
             if len(seq) * tracktor['frame_split'][0] <= i <= len(seq) * tracktor['frame_split'][1]:
                 with torch.no_grad():
                     frame_detection = my_data[my_data[:,0]==i+1, :]
-                    # breakpoint()
-                    tracker.step(frame, frame_detection)
+                    tracker.step(frame, frame_detection, num_frames)
                 num_frames += 1
+        # with open('boxes', 'wb') as fp:
+        #     pickle.dump(tracker.boxes, fp)
+        # with open('scores', 'wb') as fp:
+        #     pickle.dump(tracker.scores, fp)
+        # with open('logvars', 'wb') as fp:
+        #     pickle.dump(tracker.logvars, fp)
+        # breakpoint()
         residuals = np.stack(tracker.residuals, axis=0)
         mean = np.mean(residuals, axis=0)
         variance = np.std(residuals, axis=0)
@@ -124,7 +134,7 @@ def main(tracktor, reid, _config, _log, _run):
         print('iou variance', ious_variance)
         variances.append(variance)
         results = tracker.get_results()
-        breakpoint()
+        # breakpoint()
 
         time_total += time.time() - start
 
