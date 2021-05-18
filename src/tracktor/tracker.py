@@ -112,7 +112,6 @@ class Tracker:
 		# scores: predicted probability of objects in bbs
 		# boxes_logvar: log of variance of bbs
 
-
 		pos = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
 
 		# breakpoint()
