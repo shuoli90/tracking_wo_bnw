@@ -10,6 +10,9 @@ from torchvision.models.detection.generalized_rcnn import GeneralizedRCNN
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, AnchorGenerator, MultiScaleRoIAlign, RPNHead, RegionProposalNetwork, TwoMLPHead, GeneralizedRCNNTransform, load_state_dict_from_url, model_urls
 from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
 from torchvision.models.detection.transform import resize_boxes
+from torchvision.models.detection import FasterRCNN
+
+from tracktor.finetune import loss_nll_mot
 
 def get_conservative_box(mu, logvar):
     """
@@ -169,12 +172,22 @@ class ProbRoIHeads(RoIHeads):
         losses = {}
         if self.training:
             assert labels is not None and regression_targets is not None
-            loss_classifier, loss_box_reg = fastrcnn_loss(
-                class_logits, box_regression, labels, regression_targets)
+            # breakpoint()
+            # loss_classifier, loss_box_reg = fastrcnn_loss(
+            #     class_logits, box_regression, labels, regression_targets)
+            # losses = {
+            #     "loss_classifier": loss_classifier,
+            #     "loss_box_reg": loss_box_reg
+            # }
+            loss_box_reg = loss_nll_mot(
+                box_regression['bbox_deltas'][:, 4:8],
+                regression_targets[0],
+                box_regression['bbox_deltas_logvar'][:, 4:8]
+            )
             losses = {
-                "loss_classifier": loss_classifier,
                 "loss_box_reg": loss_box_reg
             }
+            # breakpoint()
         else:
             boxes, boxes_cons, scores, labels, labels_gt, boxes_gt = self.postprocess_detections(
                 class_logits, box_regression, proposals, image_shapes, labels_gt, regression_targets) ##NEW
@@ -280,7 +293,6 @@ class ProbRoIHeads(RoIHeads):
                     r["keypoints_scores"] = kps
 
             losses.update(loss_keypoint)
-
         return result, losses
 
     
@@ -541,7 +553,9 @@ class ProbFasterRCNN(GeneralizedRCNN):
 
         
     def forward(self, images, targets=None):
+        # breakpoint()
         out = super().forward(images, targets)
+        # breakpoint()
 
         out_new = []
         if not self.training:
@@ -554,6 +568,8 @@ class ProbFasterRCNN(GeneralizedRCNN):
                 sigma = tc.cat((sigma_worst, sigma_worst), 1)
                 pred['boxes_logvar'] = sigma.pow(2).log()
                 out_new.append(pred)
+        else:
+            return out['loss_box_reg']
                 
         return out_new
 

@@ -66,8 +66,6 @@ class Datasets(object):
             args = [{}]
 
         self._data = _sets[dataset](*args)
-        # breakpoint()
-        # self.label = np.genfromtxt(f'{fname}_data.csv', delimiter=',')
 
     def __len__(self):
         return len(self._data)

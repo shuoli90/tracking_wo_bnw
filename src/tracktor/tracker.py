@@ -15,6 +15,9 @@ from .kalmanFilter import KalmanFilter
 
 import time
 from scipy import spatial
+from scipy.special import softmax
+
+from .hmm import *
 
 class Tracker:
 	"""The main tracking file, here is where magic happens."""
@@ -49,12 +52,24 @@ class Tracker:
 
 		self.residuals = []
 		self.ious = []
+		self.boxes = []
+		self.scores = []
+		self.logvars = []
+		self.data = []
 
-		# self.use_kf = True
+		self.positions = None
+		self.previous_tracks = []
+
+		self.traj_plot = []
+		self.confidence_set = [9]
+		self.track_ids = []
 
 	def reset(self, hard=True):
 		self.tracks = []
 		self.inactive_tracks = []
+		self.data = []
+		self.scores = []
+		self.logvars = []
 
 		if hard:
 			self.track_num = 0
@@ -88,27 +103,48 @@ class Tracker:
 
 		# regress
 		boxes, scores, boxes_logvar = self.obj_detect.predict_boxes(pos)
+		# boxes, scores, boxes_logvar = self.obj_detect.predict_boxes(pos)
+		# breakpoint()
+		# self.boxes.append(boxes.cpu().numpy())
+		# self.scores.append(scores.cpu().numpy())
+		# self.logvars.append(boxes_logvar.cpu().numpy())
+		# boxes: means bounding boxes
+		# scores: predicted probability of objects in bbs
+		# boxes_logvar: log of variance of bbs
+
+
 		pos = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
 
+		# breakpoint()
 		s = []
 		for i in range(len(self.tracks) - 1, -1, -1):
 			t = self.tracks[i]
 			t.score = scores[i]
-			if scores[i] <= self.regression_person_thresh:
+
+			# breakpoint()
+
+			# label tracking HMM
+			# model, observations = label_tracking_hmm(scores[i])
+			with open("pedestrian_hmm.pkl", "rb") as file:
+				model = pickle.load(file)
+			t.pred = model.predict(scores[i].cpu().reshape(-1,1))
+			# t.pred = model.layer.uncover(observations)
+			if  t.pred == 1:
+			# if scores[i] <= self.regression_person_thresh:
 				self.tracks_to_inactive([t])
 			else:
 				s.append(scores[i])
 				"""
 				Add kalman filter here!
 				"""
-				# t.prev_pos = t.pos
-				# t.pos = pos[i].view(1, -1)
-                                
+				var = torch.exp(boxes_logvar[i, :])
+				t.kf.R = torch.diag(var)         
 				t.kf.correct(pos[i].view(1, -1))
 				t.pos = t.kf.predictedState.T
 
+			# breakpoint()
+
 		return torch.Tensor(s[::-1]).cuda()
-		#return torch.Tensor(s[::-1])
 
 	def get_pos(self):
 		"""Get the positions of all active tracks."""
@@ -118,8 +154,7 @@ class Tracker:
 			pos = torch.cat([t.pos for t in self.tracks], 0)
 		else:
 			pos = torch.zeros(0).cuda()
-			# pos = torch.zeros(0)
-		return pos
+		return torch.clip(pos, min=0.0)
 
 	def get_features(self):
 		"""Get the features of all active tracks."""
@@ -129,7 +164,6 @@ class Tracker:
 			features = torch.cat([t.features for t in self.tracks], 0)
 		else:
 			features = torch.zeros(0).cuda()
-			# features = torch.zeros(0)
 		return features
 
 	def get_inactive_features(self):
@@ -140,13 +174,11 @@ class Tracker:
 			features = torch.cat([t.features for t in self.inactive_tracks], 0)
 		else:
 			features = torch.zeros(0).cuda()
-			# features = torch.zeros(0)
 		return features
 
 	def reid(self, blob, new_det_pos, new_det_scores):
 		"""Tries to ReID inactive tracks with provided detections."""
 		new_det_features = [torch.zeros(0).cuda() for _ in range(len(new_det_pos))]
-		# new_det_features = [torch.zeros(0) for _ in range(len(new_det_pos))]
 
 		if self.do_reid:
 			new_det_features = self.reid_network.test_rois(
@@ -158,16 +190,16 @@ class Tracker:
 				for t in self.inactive_tracks:
 					dist_mat.append(torch.cat([t.test_features(feat.view(1, -1))
 					                           for feat in new_det_features], dim=1))
-					pos.append(t.pos)
+					pos.append(t.pos.cuda())
 				if len(dist_mat) > 1:
 					dist_mat = torch.cat(dist_mat, 0)
 					pos = torch.cat(pos, 0)
 				else:
 					dist_mat = dist_mat[0]
-					pos = pos[0]
+					pos = pos[0].cuda()
 
 				# calculate IoU distances
-				iou = bbox_overlaps(pos, new_det_pos)
+				iou, is_occluded = bbox_overlaps(pos.cuda(), new_det_pos)
 				iou_mask = torch.ge(iou, self.reid_iou_threshold)
 				iou_neg_mask = ~iou_mask
 				# make all impossible assignments to the same add big value
@@ -192,8 +224,7 @@ class Tracker:
 				for t in remove_inactive:
 					self.inactive_tracks.remove(t)
 
-				# keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long().cuda()
-				keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long()
+				keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long().cuda()
 				if keep.nelement() > 0:
 					new_det_pos = new_det_pos[keep]
 					new_det_scores = new_det_scores[keep]
@@ -202,11 +233,36 @@ class Tracker:
 					new_det_pos = torch.zeros(0).cuda()
 					new_det_scores = torch.zeros(0).cuda()
 					new_det_features = torch.zeros(0).cuda()
-					# new_det_pos = torch.zeros(0)
-					# new_det_scores = torch.zeros(0)
-					# new_det_features = torch.zeros(0)
 
 		return new_det_pos, new_det_scores, new_det_features
+	
+	def track_align(self, blob, new_det_pos):
+		"""Tries to ReID inactive tracks with provided detections."""
+		new_det_features = [torch.zeros(0).cuda() for _ in range(len(new_det_pos))]
+		# try:
+		new_det_features = self.reid_network.test_rois(
+			blob['img'], new_det_pos).data
+		# except:
+		# 	breakpoint()
+
+		if len(self.previous_tracks) >= 1:
+			# calculate appearance distances
+			dist_mat, pos = [], []
+			for t in self.previous_tracks:
+				dist_mat.append(torch.cat([t.test_features(feat.view(1, -1))
+											for feat in new_det_features], dim=1))
+				pos.append(t.pos.cuda())
+			
+			if len(dist_mat) > 1:
+				dist_mat = torch.cat(dist_mat, 0)
+				pos = torch.cat(pos, 0)
+			else:
+				dist_mat = dist_mat[0]
+				pos = pos[0].cuda()
+
+			dist_mat = dist_mat.cpu().numpy()
+
+		return dist_mat
 
 	def get_appearances(self, blob):
 		"""Uses the siamese CNN to get the features for all active tracks."""
@@ -227,7 +283,7 @@ class Tracker:
 			im2_gray = cv2.cvtColor(im2, cv2.COLOR_RGB2GRAY)
 			warp_matrix = np.eye(2, 3, dtype=np.float32)
 			criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, self.number_of_iterations,  self.termination_eps)
-			cc, warp_matrix = cv2.findTransformECC(im1_gray, im2_gray, warp_matrix, self.warp_mode, criteria)
+			cc, warp_matrix = cv2.findTransformECC(im1_gray, im2_gray, warp_matrix, self.warp_mode, criteria, None, 1)
 			warp_matrix = torch.from_numpy(warp_matrix)
 
 			for t in self.tracks:
@@ -282,7 +338,7 @@ class Tracker:
 				if t.last_v.nelement() > 0:
 					self.motion_step(t)
 
-	def step(self, blob, frame_detection):
+	def step(self, blob, frame_detection, num_frames, folder):
 		"""This function should be called every timestep to perform tracking with a blob
 		containing the image information.
 		"""
@@ -298,12 +354,16 @@ class Tracker:
 
 		if self.public_detections:
 			dets = blob['dets'].squeeze(dim=0)
+			# breakpoint()
 			if dets.nelement() > 0:
 				boxes, scores, boxes_logvar = self.obj_detect.predict_boxes(dets)
 			else:
 				boxes = scores = boxes_logvar = torch.zeros(0).cuda()
 		else:
 			boxes, scores, boxes_logvar = self.obj_detect.detect(blob['img'])
+			# boxes, scores = self.obj_detect.detect(blob['img'])
+		
+		# breakpoint()
 
 		if boxes.nelement() > 0:
 			boxes = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
@@ -330,6 +390,7 @@ class Tracker:
 
 		num_tracks = 0
 		nms_inp_reg = torch.zeros(0).cuda()
+		# breakpoint()
 		# nms_inp_reg = torch.zeros(0)
 		if len(self.tracks):
 			# align
@@ -379,12 +440,38 @@ class Tracker:
 					[torch.tensor([2.0]).to(det_scores.device), det_scores])
 				keep = nms(nms_track_pos, nms_track_scores, self.detection_nms_thresh)
 
+				# for i in range(nms_track_pos.shape[0]):
+				# 	idx = ((keep - i) == 0).nonzero(as_tuple=True)[0]
+				# 	if len(idx) == 0:
+				# 		t.pos = det_pos[i - 1]
 				keep = keep[torch.ge(keep, 1)] - 1
-
+				
 				det_pos = det_pos[keep]
 				det_scores = det_scores[keep]
 				if keep.nelement() == 0:
 					break
+			
+			# det_num = det_scores.shape[0]
+			# positions = []
+			# scores = []
+			# for t in tracks:
+			# 	positions.append(t.pos)
+			# 	scores.append(t.score)
+			# positions = torch.cat(positions)
+			# scores = torch.cat(scores)
+
+			# for i in range(det_num):
+			# 	nms_track_pos = torch.cat([det_pos[i], positions])
+			# 	nms_track_scores = torch.cat(
+			# 		[torch.tensor([2.0]).to(det_scores.device), scores])
+			# 	keep = nms(nms_track_pos, nms_track_scores, self.detection_nms_thresh)
+
+			# 	keep = keep[torch.ge(keep, 1)] - 1
+
+			# 	det_pos = det_pos[keep]
+			# 	det_scores = det_scores[keep]
+			# 	if keep.nelement() == 0:
+			# 		break
 
 		if det_pos.nelement() > 0:
 			new_det_pos = det_pos
@@ -416,12 +503,212 @@ class Tracker:
 		self.im_index += 1
 		self.last_image = blob['img'][0]
 
-		self.visualize(blob, self.tracks, frame_detection)
+		# breakpoint()
+
+		self.visualize(blob, self.tracks, self.inactive_tracks, frame_detection, num_frames, folder, )
 
 	def get_results(self):
 		return self.results
 
-	def visualize(self, blob, tracks, frame_detection):
+	def visualize(self, blob, tracks, inactive_tracks, frame_detection, num_frames, folder):
+		frame = blob['img'][0].data.numpy() * 255
+		frame = frame.astype(np.uint8).transpose(1,2,0)
+
+		def createimage(w,h, frame):
+			size = (w, h, 3)	
+			# img = frame.transpose(1,2,0)
+			img = np.ones((w,h,3),np.uint8)*255
+			return img
+		img = frame.copy()
+
+		for idx, gt in enumerate(frame_detection):
+			# breakpoint()
+			# if (gt[-2] == 1):
+			x = int(gt[2])
+			y = int(gt[3])
+			cv2.rectangle(img, (int(gt[2]), int(gt[3]+gt[5])), (int(gt[2]+gt[4]), int(gt[3])), color=(255,255,255), thickness=1)
+			cv2.putText(img,str(int(frame_detection[idx, 1])), (x+10,y+20),0, 0.5, color=(255,255,255), thickness=2)
+		if len(tracks) == 0:
+			# img = img[:,:,[2,1,0]]
+			# cv2.imshow('image', img)
+			# time.sleep(0.1)
+			# if cv2.waitKey(1) & 0xFF == ord('q'):
+			# 	cv2.destroyAllWindows()
+			return
+
+		gt_pos = []
+		for gt in frame_detection:
+			gt_pos.append([int(gt[2]), int(gt[3]),  int(gt[2]+gt[4]), int(gt[3]+gt[5]),])
+		gt_pos = np.array(gt_pos).astype(float)
+		
+		# Active tracks
+		positions = []
+		track_ids = []
+		for t in tracks:
+			pos = t.pos
+			tl = (pos[0, :2]).data.cpu().numpy()
+			br = pos[0, 2:].data.cpu().numpy()
+			positions.append([tl[0], tl[1], br[0], br[1]])
+			track_ids.append(t.id)
+		positions = np.array(positions).astype(float)
+		track_ids = np.array(track_ids).astype(int)
+
+		# breakpoint()
+		iou, is_occluded = bbox_overlaps(gt_pos, positions)
+		ious_mean = np.mean(np.max(iou, axis=0))
+		self.ious.append(ious_mean)
+		active_indices = np.argmax(iou, axis=0).tolist()
+
+		if type(self.positions) == type(None):
+			self.positions = positions
+			self.positions[:, 0] = np.clip(self.positions[:, 0], 0, 1920)
+			self.positions[:, 2] = np.clip(self.positions[:, 2], 0, 1920)
+			self.positions[:, 1] = np.clip(self.positions[:, 1], 0, 1080)
+			self.positions[:, 3] = np.clip(self.positions[:, 3], 0, 1080)
+			self.previous_tracks = tracks
+		positions[:, 0] = np.clip(positions[:, 0], 0, 1920)
+		positions[:, 2] = np.clip(positions[:, 2], 0, 1920)
+		positions[:, 1] = np.clip(positions[:, 1], 0, 1080)
+		positions[:, 3] = np.clip(positions[:, 3], 0, 1080)
+		if self.track_ids == []:
+			self.track_ids = track_ids
+		# print(positions)
+		# print("shape", positions.shape[0])
+		iou_track, _ = bbox_overlaps(positions, self.positions)
+		iou_max = np.sort(iou_track, axis=0)[-10:, :]
+		iou_max_arg = np.argsort(iou_track, axis=0)[-10:, :]
+		iou_track_prob = softmax(iou_track, axis=1)
+		iou_max_prob = softmax(iou_max, axis=0)
+		threshold = 0.1075
+		# print(self.confidence_set)
+		for tr in self.confidence_set:
+			tr = np.where(self.track_ids==tr)[0]
+			if tr.shape[0] == 0:
+				# breakpoint()
+				continue
+			indices = iou_max_arg[iou_max_prob[:,tr[0]]>threshold, tr[0]].tolist()
+			trs = track_ids[indices]
+			for t in trs:
+				# print(t)
+				if t not in self.confidence_set:
+					self.confidence_set.append(t)
+		self.track_ids = track_ids
+		track_prob_threshold = np.nonzero(iou_track_prob > (1/iou_track_prob.shape[1]))
+		dist_mat = self.track_align(blob, positions)
+		dist_mat_prob = softmax(dist_mat, axis=0)
+		mat_prob_thresh = np.nonzero(dist_mat_prob > (1/dist_mat_prob.shape[1]))
+
+		self.positions = positions
+		self.previous_tracks = tracks
+
+		# breakpoint()
+		gt_iou, gt_is_occluded = bbox_overlaps(gt_pos, gt_pos)
+		gt_is_occluded = gt_is_occluded > 1 
+
+		for bbox in self.traj_plot:
+			cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color=(0,255,0), thickness=1)
+
+		for (t, idx) in zip(tracks, active_indices):
+			# breakpoint()
+			# if t.id in self.confidence_set:
+			pos = t.pos
+			tl = (pos[0, :2]).data.cpu().numpy()
+			br = pos[0, 2:].data.cpu().numpy()
+			x = int((tl[0]+br[0]) / 2)
+			y = int((tl[1]+br[1]) / 2)
+
+			gt = gt_pos[idx]
+			x = int(gt[0])
+			y = int(gt[1])
+			cv2.rectangle(img, (int(gt[0]), int(gt[3])), (int(gt[2]), int(gt[1])), color=(255,255,255), thickness=2)
+			cv2.putText(img,str(int(frame_detection[idx, 1])), (x+10,y+20),0, 0.5, color=(255,255,255), thickness=2)
+
+			track_id = t.id
+			cv2.rectangle(img, (tl[0], tl[1]), (br[0], br[1]), color=(255,0,0), thickness=2)
+			# Blue label is the track id
+			cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(255,0,0), thickness=2)
+			# White label is the object id in gt file
+			self.traj_plot.append([tl[0], tl[1], br[0], br[1]])
+			# upper bound
+			# if self.use_kf:
+			# erroCov = torch.sqrt(torch.diagonal(t.kf.erroCov))
+			# cv2.rectangle(img, (tl[0]-erroCov[0], tl[1]-erroCov[1]), (br[0]+erroCov[2], br[1]+erroCov[3]), color=(0,0,255), thickness=2)
+			# cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(0,0,255), thickness=4)
+
+			# # lower bound
+			# cv2.rectangle(img, (tl[0]+erroCov[0], tl[1]+erroCov[1]), (br[0]-erroCov[2], br[1]-erroCov[3]), color=(0,255,0), thickness=2)
+			# cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(0,255,0), thickness=3)
+
+		# Inactive tracks
+		if inactive_tracks != []:
+			positions = []
+			for t in inactive_tracks:
+				pos = t.pos
+				tl = (pos[0, :2]).data.cpu().numpy()
+				br = pos[0, 2:].data.cpu().numpy()
+				positions.append([tl[0], tl[1], br[0], br[1]])
+			positions = np.array(positions).astype(float)
+
+			iou, is_occluded = bbox_overlaps(gt_pos, positions)
+			ious_mean = np.mean(np.max(iou, axis=0))
+			self.ious.append(ious_mean)
+			inactive_indices = np.argmax(iou, axis=0).tolist()
+
+		for i, (t, idx) in enumerate(zip(tracks, active_indices)):
+			pos = t.pos
+			erroCov = torch.diagonal(t.kf.erroCov)
+			# breakpoint()
+			tl = (pos[0, :2]).data.cpu().numpy()
+			br = pos[0, 2:].data.cpu().numpy()
+			self.data.append([num_frames, 
+							  tl[0], tl[1], 
+							  br[0], br[1], 
+							  erroCov[0].cpu().item(), erroCov[1].cpu().item(), 
+							  erroCov[2].cpu().item(), erroCov[3].cpu().item()])
+			self.data[-1].extend(gt_pos[idx].tolist())
+			self.data[-1].extend([1])
+			self.data[-1].extend([gt_is_occluded[idx].item()])
+			# track id
+			self.data[-1].extend([t.id])
+			# Object ID in training dataset
+			self.data[-1].extend([frame_detection[idx, 1]])
+			self.data[-1].extend([t.score])
+
+			self.data[-1].extend([np.argmax(iou_track_prob[i,:])])
+			self.data[-1].extend([np.argmax(dist_mat_prob[:, i])])
+			self.data[-1].extend([frame_detection[idx, -2]])
+		
+		if inactive_tracks != []:
+			for (t, idx) in zip(inactive_tracks, inactive_indices):
+				pos = t.pos
+				erroCov = torch.diagonal(t.kf.erroCov)
+				tl = (pos[0, :2]).data.cpu().numpy()
+				br = pos[0, 2:].data.cpu().numpy()
+				self.data.append([num_frames, 
+							      tl[0], tl[1], 
+							      br[0], br[1], 
+							      erroCov[0].cpu().item(), erroCov[1].cpu().item(), 
+							      erroCov[2].cpu().item(), erroCov[3].cpu().item()])
+				self.data[-1].extend(gt_pos[idx].tolist())
+				self.data[-1].extend([0])
+				self.data[-1].extend([gt_is_occluded[idx].item()])
+				# track id
+				self.data[-1].extend([t.id])
+				# Object ID in training dataset
+				self.data[-1].extend([frame_detection[idx, 1]])
+				self.data[-1].extend([t.score])
+				self.data[-1].extend([0.])
+				self.data[-1].extend([0.])
+				self.data[-1].extend([frame_detection[idx, -2]])
+
+		# img = img[:,:,[2,1,0]]
+		# cv2.imshow('image', img)
+		# time.sleep(0.1)
+		# if cv2.waitKey(1) & 0xFF == ord('q'):
+		# 	cv2.destroyAllWindows()
+		cv2.imwrite(f'experiments/scripts/results/{folder}_{num_frames}.png', img)
+
+	def visualize_tracks(self, blob, data):
 		frame = blob['img'][0].data.numpy() * 255
 		frame = frame.astype(np.uint8).transpose(1,2,0)
 
@@ -434,81 +721,40 @@ class Tracker:
 			return img
 		
 		img = frame.copy()
-		# frame = createimage(1080, 1920, frame)
 
-		# frame = (frame.permute(1,2,0)*255).data.numpy().astype(np.uint8)
-
-		for t in tracks:
-			pos = t.pos
-			# erroCov = torch.diagonal(t.kf.erroCov)
+		for t in range(data.shape[0]):
+			pos = data[t, 1:5]
+			erroCov = data[t, 5:9]
 			# breakpoint()
-			tl = (pos[0, :2]).data.cpu().numpy()
-			br = pos[0, 2:].data.cpu().numpy()
+			tl = pos[:2]
+			br = pos[2:]
 			x = int((tl[0]+br[0]) / 2)
 			y = int((tl[1]+br[1]) / 2)
 			# breakpoint()
-			track_id = t.id
+			# track_id = t.id
 			cv2.rectangle(img, (tl[0], tl[1]), (br[0], br[1]), color=(255,0,0), thickness=2)
-			cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(255,0,0), thickness=2)
+			# cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(255,0,0), thickness=2)
 
 			# upper bound
 			# if self.use_kf:
-			# erroCov = torch.diagonal(t.kf.erroCov)
-			# cv2.rectangle(img, (tl[0]-erroCov[0], tl[1]-erroCov[1]), (br[0]+erroCov[2], br[1]+erroCov[3]), color=(0,0,255), thickness=2)
+			# erroCov = torch.sqrt(torch.diagonal(t.kf.erroCov))
+			cv2.rectangle(img, (tl[0]-erroCov[0], tl[1]-erroCov[1]), (br[0]+erroCov[2], br[1]+erroCov[3]), (0,0,255), 2)
 			# cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(0,0,255), thickness=4)
 
 			# # lower bound
-			# cv2.rectangle(img, (tl[0]+erroCov[0], tl[1]+erroCov[1]), (br[0]-erroCov[2], br[1]-erroCov[3]), color=(0,255,0), thickness=2)
+			cv2.rectangle(img, (tl[0]+erroCov[0], tl[1]+erroCov[1]), (br[0]-erroCov[2], br[1]-erroCov[3]), (0,255,0), 2)
 			# cv2.putText(img,str(track_id), (x-10,y-20),0, 0.5, color=(0,255,0), thickness=3)
 		
-		for gt in frame_detection:
-			cv2.rectangle(img, (int(gt[2]), int(gt[3]+gt[5])), (int(gt[2]+gt[4]), int(gt[3])), color=(255,255,255), thickness=1)
+		for idx in range(data.shape[0]):
+			gt = data[idx, 9:13]
+			cv2.rectangle(img, (int(gt[0]), int(gt[1]+gt[3])), (int(gt[0]+gt[2]), int(gt[1])), (255,255,255), 1)
 
-		gt_pos = []
-		for gt in frame_detection:
-			gt_pos.append([int(gt[2]), int(gt[3]),  int(gt[2]+gt[4]), int(gt[3]+gt[5]),])
-		gt_pos = np.array(gt_pos).astype(float)
-		
-		positions = []
-		for t in tracks:
-			pos = t.pos
-			tl = (pos[0, :2]).data.cpu().numpy()
-			br = pos[0, 2:].data.cpu().numpy()
-			positions.append([tl[0], tl[1], br[0], br[1]])
-		positions = np.array(positions).astype(float)
-
-		iou = bbox_overlaps(gt_pos, positions)
-		ious_mean = np.mean(np.max(iou, axis=0))
-		self.ious.append(ious_mean)
-		indices = np.argmax(iou, axis=0).tolist()
-		# breakpoint()
-
-		# indices = []
-		# for idx in range(positions.shape[0]):
-		# 	pos = positions[idx]
-		# 	distance, index = spatial.KDTree(gt_pos).query(pos)
-		# 	indices.append(index)
-		
-		# residuals = []
-		for index, t in zip(indices, tracks):
-			tl = (t.pos[0, :2]).data.cpu().numpy()
-			br = t.pos[0, 2:].data.cpu().numpy()
-			prediction = np.hstack([tl, br])
-
-			gt= frame_detection[index]
-			gt_tl = np.array([gt[2], gt[3]])
-			gt_br = np.array([gt[2]+gt[4], gt[3]+gt[5]])
-			gt = np.hstack([gt_tl, gt_br])
-
-			self.residuals.append(prediction - gt)
-		
-		# breakpoint()
-
-		cv2.imshow('image', img)
-		cv2.imwrite(f'images_05/seq{self.im_index}.png', img)
-		time.sleep(0.1)
-		if cv2.waitKey(1) & 0xFF == ord('q'):
-			cv2.destroyAllWindows()
+		# cv2.imshow('image', img)
+		# cv2.imwrite(f'images_kf/seq{self.im_index}.png', img)
+		# cv2.imwrite(f'images/seq{num_frames}.png', img)
+		# time.sleep(0.1)
+		# if cv2.waitKey(1) & 0xFF == ord('q'):
+		# 	cv2.destroyAllWindows()
 		# breakpoint()
 
 

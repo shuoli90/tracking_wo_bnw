@@ -25,6 +25,8 @@ tracktor:
   write_images: False
   # dataset (look into tracker/datasets/factory.py)
   dataset: mot17_train_FRCNN17
+  # dataset: mot17_test_FRCNN17
+  # dataset: mot20_train
   # [start percentage, end percentage], e.g., [0.0, 0.5] for train and [0.75, 1.0] for val split.
   frame_split: [0.0, 1.0]
 
@@ -46,7 +48,7 @@ tracktor:
       center_only: False
     # DPM or DPM_RAW or 0, raw includes the unfiltered (no nms) versions of the provided detections,
     # 0 tells the tracker to use private detections (Faster R-CNN)
-    public_detections: True
+    public_detections: False
     # How much last appearance features are to keep
     max_features_num: 10
     # Do camera motion compensation

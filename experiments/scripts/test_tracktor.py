@@ -14,9 +14,10 @@ import yaml
 from tqdm import tqdm
 import sacred
 from sacred import Experiment
-from tracktor.frcnn_fpn import FRCNN_FPN, ProbFRCNN_FPN
+from tracktor.frcnn_fpn import FRCNN_FPN, ProbFRCNN_FPN, FRCNN_FPN_Custom
 from tracktor.config import get_output_dir
 from tracktor.datasets.factory import Datasets
+# from tracktor.datasets.factory_modified import Datasets
 from tracktor.oracle_tracker import OracleTracker
 from tracktor.tracker import Tracker
 from tracktor.reid.resnet import resnet50
@@ -24,6 +25,10 @@ from tracktor.utils import interpolate, plot_sequence, get_mot_accum, evaluate_m
 
 import cv2
 from numpy import genfromtxt
+import pickle
+
+import motmetrics as mm
+
 # from model.config import cfg as frcnn_cfg
 
 ex = Experiment()
@@ -65,9 +70,15 @@ def main(tracktor, reid, _config, _log, _run):
     #                            map_location=lambda storage, loc: storage))
 
     ##NEW: fasterrcnn with regression variance
-    obj_detect = ProbFRCNN_FPN(num_classes=2)
-    obj_detect.load_state_dict(torch.load('output/faster_rcnn_fpn_training_mot_17/model_params_best_coco'))
-    
+    # obj_detect = ProbFRCNN_FPN(num_classes=2)
+    # obj_detect.load_state_dict(torch.load('output/faster_rcnn_fpn_training_mot_17/model_params_best_coco'))
+    # obj_detect.load_state_dict(torch.load('output/faster_rcnn_fpn_training_mot_17/model_params_best_mot'))
+    # obj_detect.load_state_dict(torch.load('model_params_best_mot'))
+    obj_detect = FRCNN_FPN_Custom(num_classes=91, which_class=1)
+    obj_detect.load_state_dict(
+            torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True).state_dict()
+        )
+
     obj_detect.eval()
     obj_detect.cuda()
 
@@ -89,42 +100,56 @@ def main(tracktor, reid, _config, _log, _run):
     mot_accums = []
     variances = []
     dataset = Datasets(tracktor['dataset'])
-    for seq in dataset:
+
+    count = 0
+
+    # breakpoint()
+
+    for i, seq in enumerate(dataset):
+
+        if i > 0:
+            continue
+
         tracker.reset()
 
+        # folder = f'{seq}'[:-1]
         folder = f'{seq}'
         gt_file = osp.join('data', 'MOT17Labels', 'train', folder, 'gt', 'gt.txt')
+        # gt_file = osp.join('data', 'MOT17Labels', 'test', folder, 'gt', 'gt.txt')
+        
+        # my_data = genfromtxt(gt_file, delimiter=',')
+        # my_data = my_data[my_data[:, 7]==1, :]
+
+        # breakpoint()
+
+        # gt_file = osp.join('data', 'MOT20', 'train', folder, 'gt', 'gt.txt')
+        # det_file = osp.join('data', 'MOT20', 'train', folder, 'det', 'det.txt')
         
         my_data = genfromtxt(gt_file, delimiter=',')
-        my_data = my_data[my_data[:, 7]==1, :]
+        my_data = my_data[np.isin(my_data[:, -2], [1,2,7]), :]
+        # my_data = my_data[np.isin(my_data[:, -2], [3]), :]
 
         start = time.time()
 
         _log.info(f"Tracking: {seq}")
 
         data_loader = DataLoader(seq, batch_size=1, shuffle=False)
-        for i, frame in enumerate(tqdm(data_loader)):
-            # if i > 100:
+        # breakpoint()
+        for j, frame in enumerate(tqdm(data_loader)):
+            # if j <= 3:
+            #     continue
+            # if j > 40:
             #     break
-            if len(seq) * tracktor['frame_split'][0] <= i <= len(seq) * tracktor['frame_split'][1]:
+            if len(seq) * tracktor['frame_split'][0] <= j <= len(seq) * tracktor['frame_split'][1]:
                 with torch.no_grad():
-                    frame_detection = my_data[my_data[:,0]==i+1, :]
+                    frame_detection = my_data[my_data[:,0]==j+1, :]
                     # breakpoint()
-                    tracker.step(frame, frame_detection)
-                num_frames += 1
-        residuals = np.stack(tracker.residuals, axis=0)
-        mean = np.mean(residuals, axis=0)
-        variance = np.std(residuals, axis=0)
-        print('residual means', mean)
-        print('residual variance', variance)
-        ious = np.stack(tracker.ious)
-        ious_mean = np.mean(ious)
-        ious_variance = np.std(ious)
-        print('iou mean', ious_mean)
-        print('iou variance', ious_variance)
-        variances.append(variance)
+                    tracker.step(frame, frame_detection, j, folder)
+        # breakpoint()
+        data = np.asarray(tracker.data)
+        np.savetxt(f'test_results/{folder}_data.csv', data, delimiter=",")
+        # breakpoint()
         results = tracker.get_results()
-        breakpoint()
 
         time_total += time.time() - start
 
@@ -138,6 +163,14 @@ def main(tracktor, reid, _config, _log, _run):
             _log.info(f"No GT data for evaluation available.")
         else:
             mot_accums.append(get_mot_accum(results, seq))
+        
+        # breakpoint()
+        
+        mh = mm.metrics.create()
+        summary = mh.compute(mot_accums[-1], metrics=['num_frames', 'mota', 'motp'], name='acc')
+        print(summary)
+        
+        breakpoint()
 
         _log.info(f"Writing predictions to: {output_dir}")
         seq.write_results(results, output_dir)

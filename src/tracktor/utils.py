@@ -62,12 +62,16 @@ def bbox_overlaps(boxes, query_boxes):
     overlaps: (N, K) overlap between boxes and query_boxes
     """
     if isinstance(boxes, np.ndarray):
-        boxes = torch.from_numpy(boxes)
-        query_boxes = torch.from_numpy(query_boxes)
-        out_fn = lambda x: x.numpy()  # If input is ndarray, turn the overlaps back to ndarray when return
+        boxes = torch.from_numpy(boxes).cuda()
+        query_boxes = torch.from_numpy(query_boxes).cuda()
+        out_fn = lambda x: x.cpu().numpy()  # If input is ndarray, turn the overlaps back to ndarray when return
+    elif isinstance(query_boxes, np.ndarray):
+        query_boxes = torch.from_numpy(query_boxes).cuda()
+        out_fn = lambda x: x.cpu().numpy() 
     else:
         out_fn = lambda x: x
-
+    # print(boxes.shape)
+    # print(query_boxes.shape)
     box_areas = (boxes[:, 2] - boxes[:, 0] + 1) * (boxes[:, 3] - boxes[:, 1] + 1)
     query_areas = (query_boxes[:, 2] - query_boxes[:, 0] + 1) * (query_boxes[:, 3] - query_boxes[:, 1] + 1)
 
@@ -77,7 +81,8 @@ def bbox_overlaps(boxes, query_boxes):
                                                                         query_boxes[:, 1:2].t()) + 1).clamp(min=0)
     ua = box_areas.view(-1, 1) + query_areas.view(1, -1) - iw * ih
     overlaps = iw * ih / ua
-    return out_fn(overlaps)
+    # breakpoint()
+    return out_fn(overlaps), torch.sum(iw * ih == torch.unsqueeze(box_areas, 1).repeat((1,overlaps.shape[1])), dim=1)
 
 
 def plot_sequence(tracks, db, output_dir):

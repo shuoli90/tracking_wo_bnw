@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .mot_sequence import MOT17Sequence, MOT19Sequence, MOT17LOWFPSSequence, MOT20Sequence
+# from .mot_loader import MOT17Sequence
 
 
 class MOT17Wrapper(Dataset):

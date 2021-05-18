@@ -100,8 +100,9 @@ class ProbFRCNN_FPN(ProbFasterRCNN):
         img = img.to(device)
 
         detections = self(img)[0]
-
-        return detections['boxes'].detach(), detections['scores'].detach()
+        logvars = 1.5 * torch.ones_like(pred_boxes)
+        
+        return detections['boxes'].detach(), detections['scores'].detach(), logvars.detach()
 
     def predict_boxes(self, boxes):
         device = list(self.parameters())[0].device
@@ -116,19 +117,24 @@ class ProbFRCNN_FPN(ProbFasterRCNN):
 
         pred_boxes = box_regression['bbox_deltas']
         pred_boxes_cons = get_conservative_box(box_regression['bbox_deltas'], box_regression['bbox_deltas_logvar'])
-        
+
         pred_boxes = self.roi_heads.box_coder.decode(pred_boxes, proposals)
         pred_boxes_cons = self.roi_heads.box_coder.decode(pred_boxes_cons, proposals)
+
+        # breakpoint()
         
         pred_scores = F.softmax(class_logits, -1)
 
-        pred_boxes = pred_boxes[:, 1, :].squeeze(dim=1).detach() ##TODO: pick-up person, idx=1
+        pred_boxes = pred_boxes[:, 3, :].squeeze(dim=1).detach() ##TODO: pick-up car, idx=3
+        # pred_boxes = pred_boxes[:, 1, :].squeeze(dim=1).detach() ##TODO: pick-up person, idx=1
         pred_boxes = resize_boxes(pred_boxes, self.preprocessed_images.image_sizes[0], self.original_image_sizes[0])
         
-        pred_boxes_cons = pred_boxes_cons[:, 1, :].squeeze(dim=1).detach() ##TODO: pick-up person, idx=1
-        pred_boxes = resize_boxes(pred_boxes_cons, self.preprocessed_images.image_sizes[0], self.original_image_sizes[0])
+        pred_boxes_cons = pred_boxes_cons[:, 3, :].squeeze(dim=1).detach() ##TODO: pick-up car, idx=3
+        # pred_boxes_cons = pred_boxes_cons[:, 1, :].squeeze(dim=1).detach() ##TODO: pick-up person, idx=1
+        pred_boxes_cons = resize_boxes(pred_boxes_cons, self.preprocessed_images.image_sizes[0], self.original_image_sizes[0])
 
-        pred_scores = pred_scores[:, 1].detach() ##TODO: pick-up person, idx=1
+        pred_scores = pred_scores[:, 3].detach() ##TODO: pick-up car, idx=3
+        # pred_scores = pred_scores[:, 1].detach() ##TODO: pick-up person, idx=1
 
         ## compute logvar
         boxes, boxes_sigma = pred_boxes, pred_boxes_cons
@@ -137,8 +143,89 @@ class ProbFRCNN_FPN(ProbFasterRCNN):
         sigma_worst = tc.max(sigma[:, :2], sigma[:, 2:])
         sigma = tc.cat((sigma_worst, sigma_worst), 1)
         pred_boxes_logvar = sigma.pow(2).log()
-                
+        
+        # breakpoint()
+        print(pred_scores)
         return pred_boxes, pred_scores, pred_boxes_logvar
+
+    def load_image(self, images):
+        device = list(self.parameters())[0].device
+        images = images.to(device)
+
+        self.original_image_sizes = [img.shape[-2:] for img in images]
+
+        preprocessed_images, _ = self.transform(images, None)
+        self.preprocessed_images = preprocessed_images
+
+        self.features = self.backbone(preprocessed_images.tensors)
+        if isinstance(self.features, torch.Tensor):
+            self.features = OrderedDict([(0, self.features)])
+
+# This class is copied from Tracktor, except that it allows for a network with any number of
+# prediction classes, and it selects out the one specified in `which_class`.
+class FRCNN_FPN_Custom(FasterRCNN):
+
+    def __init__(self, num_classes, which_class):
+        backbone = resnet_fpn_backbone('resnet50', False)
+        super(FRCNN_FPN_Custom, self).__init__(backbone, num_classes)
+        self.which_class = which_class
+        # these values are cached to allow for feature reuse
+        self.original_image_sizes = None
+        self.preprocessed_images = None
+        self.features = None
+
+    def detect(self, img):
+        device = list(self.parameters())[0].device
+        img = img.to(device)
+
+        detections = self(img)[0]
+        
+        idxes = detections['labels'] == self.which_class
+        logvars = 1.5 * torch.ones_like(detections['boxes'][idxes])
+        # breakpoint()
+        
+        return detections['boxes'][idxes].detach(), detections['scores'][idxes].detach(), logvars.detach()
+
+    def predict_boxes(self, boxes):
+        device = list(self.parameters())[0].device
+        boxes = boxes.to(device)
+
+        boxes = resize_boxes(boxes, self.original_image_sizes[0], self.preprocessed_images.image_sizes[0])
+        proposals = [boxes]
+
+        box_features = self.roi_heads.box_roi_pool(self.features, proposals, self.preprocessed_images.image_sizes)
+        box_features = self.roi_heads.box_head(box_features)
+        class_logits, box_regression = self.roi_heads.box_predictor(box_features)
+
+        pred_boxes = self.roi_heads.box_coder.decode(box_regression, proposals)
+        pred_scores = F.softmax(class_logits, -1)
+
+        # score_thresh = self.roi_heads.score_thresh
+        # nms_thresh = self.roi_heads.nms_thresh
+
+        # self.roi_heads.score_thresh = self.roi_heads.nms_thresh = 1.0
+        # self.roi_heads.score_thresh = 0.0
+        # self.roi_heads.nms_thresh = 1.0
+        # detections, detector_losses = self.roi_heads(
+        #     features, [boxes.squeeze(dim=0)], images.image_sizes, targets)
+
+        # self.roi_heads.score_thresh = score_thresh
+        # self.roi_heads.nms_thresh = nms_thresh
+
+        # detections = self.transform.postprocess(
+        #     detections, images.image_sizes, original_image_sizes)
+
+        # detections = detections[0]
+        # return detections['boxes'].detach().cpu(), detections['scores'].detach().cpu()
+
+        # breakpoint()
+        pred_boxes = pred_boxes[:, self.which_class].detach()
+        pred_boxes = resize_boxes(pred_boxes, self.preprocessed_images.image_sizes[0], self.original_image_sizes[0])
+        # breakpoint()
+        pred_scores = pred_scores[:, self.which_class].detach()
+        logvars = 1.5 * torch.ones_like(pred_boxes)
+        # breakpoint()
+        return pred_boxes, pred_scores, logvars
 
     def load_image(self, images):
         device = list(self.parameters())[0].device
